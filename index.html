@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام تحسين المسارات والحمولات</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #e9eef2; direction: rtl; text-align: right; }
+        .container { max-width: 900px; margin: 30px auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.1); }
+        h1 { color: #004d99; text-align: center; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        input[type="file"], button { margin: 15px 0; padding: 12px; border-radius: 6px; box-sizing: border-box; }
+        input[type="file"] { border: 1px solid #ccc; width: 100%; }
+        button { background-color: #007bff; color: white; border: none; cursor: pointer; font-size: 18px; width: 100%; transition: background-color 0.3s; }
+        button:hover { background-color: #0056b3; }
+        #results { margin-top: 30px; padding-top: 20px; }
+        .vehicle-route { border: 1px solid #ddd; padding: 15px; margin-bottom: 15px; border-radius: 8px; background-color: #f9f9fc; }
+        .vehicle-route h3 { color: #28a745; margin-top: 0; }
+        .error { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>نظام التوزيع الأمثل لخطوط السير (VRP)</h1>
+        
+        <p>الرجاء تحميل ملف CSV بالصيغة: <code>LocationID, Demand</code>. يجب أن يكون الموقع الأول (ID=0) هو المستودع بطلب (Demand) يساوي صفر.</p>
+        
+        <input type="file" id="csvFile" accept=".csv">
+        <button onclick="processAndSendFile()">تحليل وحساب المسارات الأمثل</button>
+        
+        <div id="results">
+            <h2>نتائج التحسين:</h2>
+            <div id="routeOutput"></div>
+        </div>
+    </div>
+
+    <script>
+        // *** قم بتغيير هذا المتغير عند نشر الخادم (Backend) ***
+        // إذا كنت تشغله محليًا، اتركه كما هو.
+        const API_ENDPOINT = 'http://127.0.0.1:5000/solve_vrp'; 
+
+        function readCSV(file) {
+            return new Promise((resolve, reject) => {
+                Papa.parse(file, {
+                    header: true,
+                    dynamicTyping: true,
+                    skipEmptyLines: true,
+                    complete: function(results) {
+                        if (results.errors.length) {
+                            reject(results.errors[0].message);
+                        } else {
+                            resolve(results.data);
+                        }
+                    },
+                    error: reject
+                });
+            });
+        }
+
+        async function processAndSendFile() {
+            const fileInput = document.getElementById('csvFile');
+            const file = fileInput.files[0];
+            const outputDiv = document.getElementById('routeOutput');
+            outputDiv.innerHTML = 'جاري التحليل والحساب...';
+
+            if (!file) {
+                alert("الرجاء تحديد ملف CSV أولاً.");
+                outputDiv.innerHTML = '';
+                return;
+            }
+
+            try {
+                const rawCustomerData = await readCSV(file);
+                
+                // التأكد من أن الأعمدة المطلوبة موجودة
+                if (!rawCustomerData.every(row => 'LocationID' in row && 'Demand' in row)) {
+                    throw new Error("ملف CSV يجب أن يحتوي على عمودين هما 'LocationID' و 'Demand'.");
+                }
+                
+                // تجهيز بيانات الإرسال للخادم
+                const payload = {
+                    customer_data: rawCustomerData,
+                    vehicle_capacities: [20, 20], // سعة كل سيارة: 20 وحدة (يمكن تغييرها)
+                    depot_index: 0 // المستودع هو النقطة ذات المعرّف 0
+                };
+
+                // إرسال البيانات إلى الخادم الخلفي (Flask)
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+
+                if (!response.ok || result.error) {
+                    throw new Error(result.error || `خطأ في الخادم (HTTP Status ${response.status})`);
+                }
+                
+                displayResults(result);
+
+            } catch (error) {
+                console.error('حدث خطأ:', error);
+                outputDiv.innerHTML = `<p class="error">خطأ في المعالجة: ${error.message}. تأكد من تشغيل الخادم الخلفي (app.py).</p>`;
+            }
+        }
+
+        function displayResults(data) {
+            const outputDiv = document.getElementById('routeOutput');
+            outputDiv.innerHTML = '';
+
+            if (data.solution_status === "OPTIMAL") {
+                data.routes.forEach((route, index) => {
+                    const routeText = route.route_nodes.join(' $\\rightarrow$ ');
+                    const routeElement = document.createElement('div');
+                    routeElement.className = 'vehicle-route';
+                    routeElement.innerHTML = `
+                        <h3>🚚 مسار السيارة رقم ${index + 1}</h3>
+                        <p><strong>الحمولة الكلية المستخدمة:</strong> ${route.total_load} وحدات</p>
+                        <p><strong>إجمالي المسافة التقديرية:</strong> ${route.total_distance.toFixed(2)} كم</p>
+                        <p><strong>تسلسل التوقفات:</strong> المستودع $\\rightarrow$ ${routeText} $\\rightarrow$ المستودع</p>
+                    `;
+                    outputDiv.appendChild(routeElement);
+                });
+            } else {
+                outputDiv.innerHTML = `<p style="color: orange;">لم يتم العثور على حل أمثل. الحالة: ${data.solution_status}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

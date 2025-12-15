@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام تحسين المسارات والحمولات</title>
+    <style>
+        body { font-family: Tahoma, sans-serif; padding: 20px; background-color: #f4f4f9; }
+        .container { max-width: 900px; margin: auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { color: #333; text-align: center; }
+        input[type="file"] { display: block; margin: 15px 0; padding: 10px; border: 1px solid #ccc; border-radius: 4px; width: 100%; box-sizing: border-box; }
+        button { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        button:hover { background-color: #0056b3; }
+        #results { margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px; }
+        .vehicle-route { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; background-color: #f9f9f9; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>نظام التوزيع الأمثل لخطوط السير (VRP)</h1>
+        
+        <p>الرجاء تحميل ملف CSV يحتوي على بيانات العملاء والطلب (يفترض أن الإحداثيات تم تحديدها مسبقاً في السيناريو الحالي):</p>
+        
+        <input type="file" id="csvFile" accept=".csv">
+        <button onclick="processAndSendFile()">تحليل وحساب المسارات</button>
+        
+        <div id="results">
+            <h2>نتائج التحسين:</h2>
+            <div id="routeOutput"></div>
+        </div>
+    </div>
+
+    <script>
+        // دالة مساعدة لقراءة ملف CSV
+        function readCSV(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const text = e.target.result;
+                    const lines = text.trim().split('\n');
+                    const headers = lines[0].split(',').map(h => h.trim());
+                    const data = [];
+                    for (let i = 1; i < lines.length; i++) {
+                        const values = lines[i].split(',').map(v => v.trim());
+                        if (values.length === headers.length) {
+                            const entry = {};
+                            headers.forEach((header, index) => {
+                                entry[header] = values[index];
+                            });
+                            data.push(entry);
+                        }
+                    }
+                    resolve(data);
+                };
+                reader.onerror = reject;
+                reader.readAsText(file);
+            });
+        }
+
+        async function processAndSendFile() {
+            const fileInput = document.getElementById('csvFile');
+            const file = fileInput.files[0];
+            if (!file) {
+                alert("الرجاء تحديد ملف CSV أولاً.");
+                return;
+            }
+
+            try {
+                // 1. قراءة الملف وتحويله إلى JSON
+                const customerData = await readCSV(file);
+                
+                // 2. تجهيز بيانات الإرسال (البيانات الإضافية يتم تخزينها هنا)
+                const payload = {
+                    customer_data: customerData,
+                    // سنفترض أن سعة السيارات والمستودع ثابتة في هذا النموذج
+                    vehicle_capacities: [15, 15], // سعة كل سيارة 15 وحدة حمولة
+                    depot_index: 0 // المستودع هو أول نقطة (النقطة رقم 0)
+                };
+
+                // 3. إرسال البيانات إلى الخادم الخلفي (Flask)
+                const response = await fetch('http://127.0.0.1:5000/solve_vrp', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const result = await response.json();
+                
+                // 4. عرض النتائج
+                displayResults(result);
+
+            } catch (error) {
+                console.error('حدث خطأ:', error);
+                document.getElementById('routeOutput').innerHTML = `<p style="color: red;">خطأ في المعالجة: ${error.message}</p>`;
+            }
+        }
+
+        function displayResults(data) {
+            const outputDiv = document.getElementById('routeOutput');
+            outputDiv.innerHTML = '';
+
+            if (data.solution_status === "OPTIMAL") {
+                data.routes.forEach((route, index) => {
+                    const routeText = route.route_nodes.join(' $\\rightarrow$ ');
+                    const routeElement = document.createElement('div');
+                    routeElement.className = 'vehicle-route';
+                    routeElement.innerHTML = `
+                        <h3>🚚 مسار السيارة رقم ${index + 1}</h3>
+                        <p><strong>الحمولة الكلية:</strong> ${route.total_load} وحدات</p>
+                        <p><strong>إجمالي المسافة:</strong> ${route.total_distance.toFixed(2)} كم (افتراضية)</p>
+                        <p><strong>تسلسل التوقفات:</strong> المستودع ${routeText} $\\rightarrow$ المستودع</p>
+                    `;
+                    outputDiv.appendChild(routeElement);
+                });
+            } else {
+                outputDiv.innerHTML = `<p style="color: orange;">لم يتم العثور على حل أمثل. الحالة: ${data.solution_status}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>
+pip install Flask ortools
+from flask import Flask, request, jsonify
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
+from flask_cors import CORS # للسماح للواجهة الأمامية بالتواصل مع الخلفية
+
+# --- 1. إعداد تطبيق Flask ---
+app = Flask(__name__)
+# للسماح لملف HTML بالوصول إلى هذا الخادم (مهم للتطوير المحلي)
+CORS(app) 
+
+# --- 2. بيانات نموذجية للمشكلة (تم إعدادها مسبقًا) ---
+# نفترض أن لدينا 6 نقاط (النقطة 0 هي المستودع، والباقي عملاء)
+# مصفوفة مسافات وهمية (يجب أن تكون المسافة من A إلى B هي نفسها من B إلى A)
+# المسافة بين جميع النقاط (بما في ذلك المستودع كالنقطة 0)
+def create_distance_matrix(num_locations):
+    # مصفوفة مسافات افتراضية (بكم/بالمتر)
+    # 0 = المستودع, 1..5 = العملاء
+    return [
+        [0, 10, 15, 20, 12, 8],   # من 0 (المستودع)
+        [10, 0, 8, 11, 14, 2],    # من 1 (عميل 1)
+        [15, 8, 0, 5, 6, 1],      # من 2 (عميل 2)
+        [20, 11, 5, 0, 7, 13],    # من 3 (عميل 3)
+        [12, 14, 6, 7, 0, 9],     # من 4 (عميل 4)
+        [8, 2, 1, 13, 9, 0]       # من 5 (عميل 5)
+    ]
+
+# --- 3. دالة التحسين الرئيسية ---
+def solve_vrp(data):
+    """حل مشكلة توجيه المركبات مع قيود السعة (CVRP)."""
+    
+    # 3.1. تجهيز بيانات OR-Tools
+    # عدد العقد (المواقع)
+    manager = pywrapcp.RoutingIndexManager(
+        data['num_locations'], data['num_vehicles'], data['depot_index'])
+    
+    # نموذج المسارات
+    routing = pywrapcp.RoutingModel(manager)
+
+    # 3.2. دالة التكلفة (Transit Callback)
+    # تحدد المسافة/التكلفة للانتقال بين أي نقطتين
+    def distance_callback(from_index, to_index):
+        """إرجاع المسافة بين نقطتين."""
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return data['distance_matrix'][from_node][to_node]
+
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
+    # 3.3. إضافة قيود السعة (Capacity Constraint)
+    # تحدد دالة الطلب/الحمولة التي يجب جمعها في كل نقطة
+    def demand_callback(from_index):
+        """إرجاع الطلب (الحمولة) في كل نقطة."""
+        from_node = manager.IndexToNode(from_index)
+        return data['demands'][from_node]
+
+    demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
+
+    # إضافة بُعد "الحمولة" للنموذج
+    routing.AddDimensionWithVehicleCapacity(
+        demand_callback_index,  # دالة الطلب/الحمولة
+        0,                      # سعة الانتظار (Accumulation slack) مسموح بها
+        data['vehicle_capacities'],  # قائمة بسعات جميع المركبات
+        True,                   # البدء من الصفر
+        'Capacity')
+
+    # 3.4. تحديد معايير البحث (Search Parameters)
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC) # استراتيجية سريعة للحل الأولي
+    
+    # تحسين الحل الأولي
+    search_parameters.local_search_metaheuristic = (
+        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH)
+    search_parameters.time_limit.seconds = 1  # تحديد زمن البحث (لمنع البحث اللانهائي)
+
+    # 3.5. تشغيل الحل
+    solution = routing.SolveWithParameters(search_parameters)
+
+    return routing, manager, solution
+
+# --- 4. دالة عرض النتائج (Processing the Solution) ---
+def get_solution_details(data, manager, routing, solution):
+    """تحويل كائن الحل إلى تنسيق JSON سهل القراءة."""
+    if not solution:
+        return {'solution_status': 'NO_SOLUTION', 'routes': []}
+
+    routes = []
+    
+    # جلب بُعد الحمولة لحساب الحمولة الكلية لكل سيارة
+    capacity_dimension = routing.GetDimensionOrDie('Capacity')
+    
+    # تكرار على كل مركبة
+    for vehicle_id in range(data['num_vehicles']):
+        index = routing.Start(vehicle_id) # نقطة البداية (المستودع)
+        route_nodes = []
+        route_distance = 0
+        total_load = 0
+
+        # تكرار على طول المسار
+        while not routing.IsEnd(index):
+            node_index = manager.IndexToNode(index)
+            
+            # جلب الحمولة الكلية عند هذا التوقف (لتتبع الحمولة)
+            load_var = capacity_dimension.CumulVar(index)
+            
+            # إضافة النقطة إلى المسار (تجنب إضافة نقطة البداية مرة أخرى)
+            if node_index != data['depot_index']:
+                 route_nodes.append(node_index)
+
+            previous_index = index
+            index = solution.Value(routing.NextVar(index))
+            
+            # حساب المسافة الكلية
+            route_distance += routing.Get ;ArcCostForVehicle(previous_index, index, vehicle_id)
+            
+        # بعد انتهاء المسار، نحصل على الحمولة النهائية للسيارة (أقصى حمولة تم حملها)
+        end_index = routing.End(vehicle_id)
+        total_load = solution.Value(capacity_dimension.CumulVar(end_index))
+        
+        # إضافة تفاصيل المسار لنتائج JSON
+        routes.append({
+            'vehicle_id': vehicle_id + 1,
+            'route_nodes': route_nodes,
+            'total_distance': route_distance / 1000, # تحويلها إلى كم (افتراضيًا)
+            'total_load': total_load
+        })
+
+    return {
+        'solution_status': 'OPTIMAL',
+        'objective_value': solution.ObjectiveValue(), # التكلفة الكلية (المسافة الكلية)
+        'routes': routes
+    }
+
+
+# --- 5. نقطة نهاية (API Endpoint) لـ Flask ---
+@app.route('/solve_vrp', methods=['POST'])
+def handle_vrp_request():
+    """معالجة طلب حل مشكلة VRP."""
+    try:
+        # 1. استقبال البيانات من الواجهة الأمامية
+        request_data = request.get_json()
+        
+        customer_data = request_data.get('customer_data', [])
+        vehicle_capacities = request_data.get('vehicle_capacities', [])
+        depot_index = request_data.get('depot_index', 0)
+
+        # 2. تجهيز البيانات لـ OR-Tools
+        # نحتاج إلى 1 (للمستودع) + عدد العملاء
+        num_customers = len(customer_data)
+        num_locations = num_customers + 1
+        num_vehicles = len(vehicle_capacities)
+        
+        # إنشاء مصفوفة المسافات
+        distance_matrix = create_distance_matrix(num_locations) 
+        
+        # إنشاء مصفوفة الطلب (Demand Matrix)
+        # النقطة 0 (المستودع) لها طلب 0
+        demands = [0] + [int(c['Demand']) for c in customer_data]
+        
+        # تجميع كل البيانات في قاموس واحد
+        data = {
+            'distance_matrix': distance_matrix,
+            'demands': demands,
+            'num_locations': num_locations,
+            'num_vehicles': num_vehicles,
+            'depot_index': depot_index,
+            'vehicle_capacities': vehicle_capacities
+        }
+
+        # 3. حل المشكلة
+        routing, manager, solution = solve_vrp(data)
+
+        # 4. إعداد الاستجابة
+        response = get_solution_details(data, manager, routing, solution)
+        return jsonify(response)
+
+    except Exception as e:
+        print(f"Error during VRP solving: {e}")
+        return jsonify({'error': str(e), 'solution_status': 'ERROR'}), 500
+
+# --- 6. تشغيل الخادم ---
+if __name__ == '__main__':
+    # تأكد من أنك تشغل الخادم على المنفذ والاسم الذي تستخدمه الواجهة الأمامية
+    app.run(debug=True)
